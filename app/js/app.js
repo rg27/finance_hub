@@ -10,6 +10,7 @@ let currentQuoteId;
 let currentReviewAction = null;
 let currentLineItems = [];
 let lastPaymentLinkUrl = null;
+let currentPaymentInfo = null;
 
 
 const FUNCTION_MAP = {
@@ -27,8 +28,8 @@ const ACTION_STATUS_TEXT = {
     create_zb_estimate: "Creating estimate...",
     create_payment_link: "Generating payment link...",
     cancel_payment_link: "Voiding active payment link...",
-    add_activity_mix: "Attaching Activity Mix record...",
-    add_general_trading_activity: "Attaching General Trading Activity record..."
+    add_activity_mix: "Adding Activity Mix product...",
+    add_general_trading_activity: "Adding General Trading Activity product..."
 };
 
 
@@ -319,7 +320,8 @@ function populateHeaderFromQuoteRecord(record) {
 
     updateActionButtonState("create_zb_estimate", record.already_created_zb_estimate === true || record.already_created_zb_estimate === "true");
     updateActionButtonState("create_zb_invoice", record.already_created_zb_invoice === true || record.already_created_zb_invoice === "true");
-
+    updatePaymentLinkButtonState(record);
+    updateCancelButtonState(record);
 }
 
 function setText(id, value) {
@@ -328,6 +330,88 @@ function setText(id, value) {
 
     if (el) el.innerText = (value === undefined || value === null || value === "") ? "—" : value;
 
+}
+
+function updatePaymentLinkButtonState(record) {
+    const btn = document.querySelector('.fh-action-btn[data-action="create_payment_link"]');
+    if (!btn) return;
+
+    const existingBadge = btn.querySelector(".fh-created-badge");
+    if (existingBadge) existingBadge.remove();
+
+    const status = (record.op_status || "").toLowerCase();
+    const isActive = record.op_url && (status === "generated" || status === "paid");
+
+    if (isActive) {
+        currentPaymentInfo = {
+            url: record.op_url,
+            status: record.op_status,
+            amount: record.op_amount,
+            expiry: record.op_expiry,
+            reference: record.op_reference,
+            requestedBy: record.op_requested_by
+        };
+
+        btn.classList.add("fh-action-btn--done");
+        btn.setAttribute("data-payment-active", "true");
+        btn.disabled = false; // stays clickable — click opens the info view instead of creating
+
+        const badgeText = status === "paid" ? "Paid" : "Generated";
+        const badge = document.createElement("span");
+        badge.className = "fh-created-badge";
+        badge.innerHTML = `<svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>${badgeText}`;
+        btn.appendChild(badge);
+    } else {
+        currentPaymentInfo = null;
+        btn.classList.remove("fh-action-btn--done");
+        btn.removeAttribute("data-payment-active");
+    }
+}
+function openPaymentInfoModal() {
+    if (!currentPaymentInfo) return;
+    const modal = document.getElementById("payment-info-modal");
+    const s = (currentPaymentInfo.status || "").toLowerCase();
+    const dotColor = s === "generated" ? "bg-emerald-500" : s === "paid" ? "bg-blue-500" : "bg-slate-400";
+
+    const statusDot = document.getElementById("pi-status-dot");
+    if (statusDot) statusDot.className = `w-2 h-2 rounded-full ${dotColor}`;
+
+    setPiText("pi-status-label", currentPaymentInfo.status);
+    setPiText("pi-amount", currentPaymentInfo.amount);
+    setPiText("pi-reference", currentPaymentInfo.reference);
+    setPiText("pi-expiry", currentPaymentInfo.expiry);
+    setPiText("pi-link-text", currentPaymentInfo.url);
+
+    const requestedByEl = document.getElementById("pi-requested-by");
+    if (requestedByEl) requestedByEl.textContent = currentPaymentInfo.requestedBy ? `Requested by ${currentPaymentInfo.requestedBy}` : "";
+
+    if (modal) { modal.classList.remove("hidden"); modal.classList.add("flex"); }
+}
+
+function setPiText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = (value === undefined || value === null || value === "") ? "—" : value;
+}
+
+function closePaymentInfoModal() {
+    const modal = document.getElementById("payment-info-modal");
+    if (modal) { modal.classList.add("hidden"); modal.classList.remove("flex"); }
+}
+
+function copyPaymentInfoLink() {
+    if (!currentPaymentInfo || !currentPaymentInfo.url) return;
+    const copyIcon = document.getElementById("pi-link-copy-icon");
+    navigator.clipboard.writeText(currentPaymentInfo.url).then(() => {
+        if (copyIcon) {
+            const original = copyIcon.innerHTML;
+            copyIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>';
+            copyIcon.classList.add("text-emerald-500");
+            setTimeout(() => {
+                copyIcon.innerHTML = original;
+                copyIcon.classList.remove("text-emerald-500");
+            }, 1200);
+        }
+    }).catch((err) => console.error("[Finance Hub] ✗ Copy failed:", err));
 }
 
 function updateActionButtonState(actionKey, isCreated) {
@@ -351,13 +435,59 @@ function updateActionButtonState(actionKey, isCreated) {
     }
 }
 
-
-
 document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll(".fh-action-btn").forEach((btn) => {
         btn.addEventListener("click", () => {
             const actionKey = btn.getAttribute("data-action");
             const label = btn.getAttribute("data-label") || actionKey;
+
+            if (actionKey === "cancel_payment_link") {
+                openConfirmModal({
+                    title: "Cancel Payment Link?",
+                    message: "This will void the active payment link. The customer will no longer be able to pay using it.",
+                    confirmLabel: "Cancel Link",
+                    variant: "danger",
+                    onConfirm: () => runFinanceAction(actionKey, label, btn)
+                });
+                return;
+            }
+
+            if (actionKey === "create_payment_link") {
+                if (btn.getAttribute("data-payment-active") === "true") {
+                    openPaymentInfoModal();
+                    return;
+                }
+                openConfirmModal({
+                    title: "Create Payment Link?",
+                    message: "This will generate a payment link based on the quote total and email it to the customer.",
+                    confirmLabel: "Create Link",
+                    variant: "default",
+                    onConfirm: () => runFinanceAction(actionKey, label, btn)
+                });
+                return;
+            }
+
+            if (actionKey === "add_activity_mix") {
+                openConfirmModal({
+                    title: "Add Activity Mix?",
+                    message: "This will add an Activity Mix line item to this Quote's product list.",
+                    confirmLabel: "Add Activity Mix",
+                    variant: "default",
+                    onConfirm: () => runFinanceAction(actionKey, label, btn)
+                });
+                return;
+            }
+
+            if (actionKey === "add_general_trading_activity") {
+                openConfirmModal({
+                    title: "Add General Trading Activity?",
+                    message: "This will add a General Trading Activity line item to this Quote's product list.",
+                    confirmLabel: "Add General Trading Activity",
+                    variant: "default",
+                    onConfirm: () => runFinanceAction(actionKey, label, btn)
+                });
+                return;
+            }
 
             if (btn.getAttribute("data-created") === "true") {
                 const itemLabel = actionKey === "create_zb_estimate" ? "Estimate" : actionKey === "create_zb_invoice" ? "Invoice" : "record";
@@ -1249,7 +1379,13 @@ function showToast(message, type = "error") {
 
 
 function formatPaymentAmount(value) {
-    const num = parseFloat(value);
+    if (value === undefined || value === null || value === "") return "—";
+    const str = String(value).trim();
+
+    // Already formatted (e.g. "AED5,299.20") — just display it directly
+    if (/[a-zA-Z]/.test(str)) return str;
+
+    const num = parseFloat(str);
     if (isNaN(num)) return "—";
     return "AED " + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -1276,4 +1412,44 @@ function copyPaymentLink() {
             }, 1200);
         }
     }).catch((err) => console.error("[Finance Hub] ✗ Copy failed:", err));
+}
+
+function openConfirmModal(config) {
+    const modal = document.getElementById("confirm-modal");
+    const iconWrap = document.getElementById("confirm-modal-icon-wrap");
+    const icon = document.getElementById("confirm-modal-icon");
+    const title = document.getElementById("confirm-modal-title");
+    const message = document.getElementById("confirm-modal-message");
+    const actionBtn = document.getElementById("confirm-modal-action-btn");
+
+    const isDanger = config.variant === "danger";
+
+    if (iconWrap) iconWrap.className = `w-12 h-12 mx-auto rounded-full flex items-center justify-center ${isDanger ? "bg-red-50 dark:bg-red-950/40" : "bg-indigo-50 dark:bg-indigo-950/40"}`;
+    if (icon) {
+        icon.className = `w-6 h-6 ${isDanger ? "text-red-500" : "text-indigo-500"}`;
+        icon.innerHTML = isDanger
+            ? '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4c-.77-1.33-2.69-1.33-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/>'
+            : '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 010 5.656l-3 3a4 4 0 01-5.656-5.656l1.5-1.5m3.656 1.5a4 4 0 010-5.656l3-3a4 4 0 015.656 5.656l-1.5 1.5"/>';
+    }
+    if (title) title.textContent = config.title || "Are you sure?";
+    if (message) message.textContent = config.message || "";
+    if (actionBtn) {
+        actionBtn.textContent = config.confirmLabel || "Confirm";
+        actionBtn.className = `flex-1 font-black px-4 py-2.5 rounded-xl text-[9px] uppercase tracking-wide transition-all ${isDanger ? "bg-red-600 text-white hover:bg-red-500" : "bg-indigo-600 text-white hover:bg-indigo-500"}`;
+        actionBtn.onclick = () => { closeConfirmModal(); config.onConfirm(); };
+    }
+
+    if (modal) { modal.classList.remove("hidden"); modal.classList.add("flex"); }
+}
+
+function closeConfirmModal() {
+    const modal = document.getElementById("confirm-modal");
+    if (modal) { modal.classList.add("hidden"); modal.classList.remove("flex"); }
+}
+
+function updateCancelButtonState(record) {
+    const btn = document.querySelector('.fh-action-btn[data-action="cancel_payment_link"]');
+    if (!btn) return;
+    const status = (record.op_status || "").toLowerCase();
+    btn.disabled = status !== "generated";
 }
