@@ -11,7 +11,7 @@ let currentReviewAction = null;
 let currentLineItems = [];
 let lastPaymentLinkUrl = null;
 let currentPaymentInfo = null;
-
+let currentUserId = null;
 
 const FUNCTION_MAP = {
     create_zb_invoice: "fh_create_zb_invoice",
@@ -57,17 +57,13 @@ ZOHO.embeddedApp.on("PageLoad", async function (entity) {
 
     console.log("[Finance Hub] 🔍 PageLoad Event Triggered. Raw entity object:", JSON.stringify(entity, null, 2));
 
-
-
     ZOHO.CRM.UI.Resize({ height: "750", width: "1300" });
-
-
 
     currentQuoteId = entity && entity.EntityId ? entity.EntityId[0] : null;
 
     console.log("[Finance Hub] 🔑 Captured currentQuoteId (EntityId[0]):", currentQuoteId);
 
-
+    fetchCurrentUserGreeting();
 
     await initPortal();
 
@@ -99,6 +95,20 @@ function setLastUpdateLabel(text) {
 
     if (el) el.textContent = text;
 
+}
+
+function fetchCurrentUserGreeting() {
+    if (typeof ZOHO === "undefined" || !ZOHO.CRM || !ZOHO.CRM.CONFIG) return;
+
+    ZOHO.CRM.CONFIG.getCurrentUser().then(function (data) {
+        const user = data && data.users && data.users[0];
+        const firstName = user && (user.first_name || (user.full_name ? user.full_name.split(" ")[0] : null));
+        currentUserId = user && user.id ? user.id : null;
+        const el = document.getElementById("user-greeting");
+        if (el) el.textContent = firstName ? `Hello, ${firstName}` : "";
+    }).catch(function (err) {
+        console.error("[Finance Hub] ✗ Failed to fetch current user:", err);
+    });
 }
 
 
@@ -572,6 +582,7 @@ async function runFinanceAction(actionKey, label, btnEl, extraPayload = {}) {
 
         showOverlayResult(true, resultMessage, resultRecordId, openRecordFn, paymentLinkData);
         showToast(resultMessage, "success");
+        logActionNote(actionKey);
         fetchQuoteData().catch(() => {});
 
         if (openRecordFn && resultRecordId) {
@@ -1452,4 +1463,15 @@ function updateCancelButtonState(record) {
     if (!btn) return;
     const status = (record.op_status || "").toLowerCase();
     btn.disabled = status !== "generated";
+}
+
+function logActionNote(actionKey) {
+    if (!currentUserId || !currentQuoteId) return;
+
+    const payload = { "quote_id": currentQuoteId, "user_id": currentUserId, "action": actionKey };
+    const args = { "arguments": JSON.stringify(payload) };
+
+    ZOHO.CRM.FUNCTIONS.execute("fh_create_notes", args).catch((err) => {
+        console.error("[Finance Hub] ✗ Failed to log action note:", err);
+    });
 }
